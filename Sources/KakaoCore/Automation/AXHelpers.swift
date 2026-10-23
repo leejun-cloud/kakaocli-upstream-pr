@@ -192,35 +192,38 @@ public enum AXHelpers {
         case ambiguous([String])
     }
 
-    /// Find the single AXRow in a chat list whose name label matches the given text.
-    /// KakaoTalk chat list: AXTable > AXRow > AXCell > AXStaticText(id="_NS:18")
-    ///
-    /// An exact name match wins over substring matches. If more than one row matches
-    /// (and no single exact match exists), returns `.ambiguous` so callers never act
-    /// on whichever row happens to be listed first.
-    public static func lookupChatRow(_ table: AXUIElement, chatName: String) -> ChatRowLookup {
-        var matches: [(name: String, row: AXUIElement)] = []
-        for row in children(table) {
-            guard role(row) == "AXRow" else { continue }
-            rowLoop: for cell in children(row) {
-                guard role(cell) == "AXCell" else { continue }
-                for child in children(cell) {
-                    if role(child) == "AXStaticText" && identifier(child) == "_NS:18" {
-                        let name = value(child) ?? ""
-                        if name.localizedCaseInsensitiveContains(chatName) {
-                            matches.append((name, row))
-                            break rowLoop
-                        }
-                    }
-                }
+    /// The chat name shown in a chat list row: the first AXStaticText in the cell.
+    /// KakaoTalk chat list: AXTable > AXRow > AXCell > AXStaticText (name), then member
+    /// count / time labels. The name's AX id is not stable across versions ("_NS:18" in
+    /// older builds, "_NS:40" in newer ones, where "_NS:18" is a badge image), so match by position.
+    public static func chatRowName(_ row: AXUIElement) -> String? {
+        for cell in children(row) where role(cell) == "AXCell" {
+            if let label = children(cell).first(where: { role($0) == "AXStaticText" }) {
+                return value(label)
             }
         }
+        return nil
+    }
 
-        let exactMatches = matches.filter { $0.name == chatName }
-        if exactMatches.count == 1 { return .found(exactMatches[0].row) }
-        if exactMatches.isEmpty && matches.count == 1 { return .found(matches[0].row) }
-        if matches.isEmpty { return .notFound }
-        return .ambiguous(matches.map(\.name))
+    /// Group chat rows show a member count label; 1:1 chats don't.
+    public static func isGroupChatRow(_ row: AXUIElement) -> Bool {
+        children(row).contains { cell in
+            role(cell) == "AXCell" && children(cell).contains { identifier($0) == "Count Label" }
+        }
+    }
+
+    /// Find the single AXRow in a chat list whose name label matches the given text.
+    /// See `ChatNameMatcher.pick` for how multiple matches are resolved.
+    public static func lookupChatRow(_ table: AXUIElement, chatName: String) -> ChatRowLookup {
+        let named = children(table).compactMap { row -> (row: AXUIElement, candidate: ChatNameMatcher.Candidate)? in
+            guard role(row) == "AXRow", let name = chatRowName(row) else { return nil }
+            return (row, ChatNameMatcher.Candidate(name: name, isGroup: isGroupChatRow(row)))
+        }
+        switch ChatNameMatcher.pick(chatName, from: named.map(\.candidate)) {
+        case .found(let index): return .found(named[index].row)
+        case .notFound: return .notFound
+        case .ambiguous(let names): return .ambiguous(names)
+        }
     }
 
     /// Find the self-chat row (identified by "badge me" image in the cell).
